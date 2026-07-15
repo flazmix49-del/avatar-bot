@@ -77,6 +77,16 @@ def check_premium(user_id):
         return True
     return False
 
+def get_premium_days_left(user_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('SELECT premium_until FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    if result:
+        return max(0, (result[0] - int(time.time())) // 86400)
+    return 0
+
 def save_order(user_id, avatar_path):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()

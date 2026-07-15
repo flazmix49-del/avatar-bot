@@ -1,22 +1,36 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, ConversationHandler
 from config import BOT_TOKEN, PREMIUM_PRICE, FREE_ATTEMPTS
-from ai_generator import generate_avatar
-from database import init_db, get_user, add_user, update_user_count, set_premium, reset_daily, check_premium, save_order
+from ai_generator import generate_avatar, generate_video, get_fact
+from database import init_db, get_user, add_user, update_user_count, set_premium, reset_daily, check_premium, save_order, get_premium_days_left
 import os
+import random
+import sqlite3
+import time
 
+# Состояния
 WAITING_PROMPT = 1
+WAITING_VIDEO = 2
 
-def main_menu(is_premium=False, remaining=0):
+def main_menu(is_premium=False, remaining=0, days_left=0):
     keyboard = [
-        [InlineKeyboardButton("🎨 Создать аватарку", callback_data="create")],
-        [InlineKeyboardButton("💎 Премиум", callback_data="premium_menu")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+        [
+            InlineKeyboardButton("🎨 Аватарка", callback_data="create"),
+            InlineKeyboardButton("🎬 Видео", callback_data="video_create")
+        ],
+        [
+            InlineKeyboardButton("🔥 Факт дня", callback_data="fact"),
+            InlineKeyboardButton("💎 Премиум", callback_data="premium_menu")
+        ],
+        [
+            InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+            InlineKeyboardButton("🔄 Перезапустить", callback_data="main_menu")
+        ]
     ]
     if not is_premium:
         keyboard.append([InlineKeyboardButton(f"🔥 Осталось: {remaining} попыток", callback_data="noop")])
     else:
-        keyboard.append([InlineKeyboardButton("🔥 Премиум активен ♾️", callback_data="noop")])
+        keyboard.append([InlineKeyboardButton(f"🔥 Премиум: {days_left} дней", callback_data="noop")])
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -30,21 +44,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining = FREE_ATTEMPTS - avatar_count
     if remaining < 0:
         remaining = 0
+    
+    days_left = get_premium_days_left(user.id)
 
     await update.message.reply_text(
-        f"🤖 **Привет, {user.username or 'друг'}!**\n\n"
-        "Я создаю **реалистичные аватарки** через нейросеть!\n\n"
-        f"🔥 Бесплатно: **{remaining}** аватарок сегодня\n"
+        f"🤖 **NeonFace**\n\n"
+        "Создаю **аватарки** и **видео** через нейросеть!\n\n"
+        f"🔥 Бесплатно: **{remaining}** попыток сегодня\n"
         f"💎 Премиум: **безлимит** на 15 дней\n"
-        f"💰 Цена: **{PREMIUM_PRICE} Stars** (~50₽)\n\n"
-        "👇 **Нажми на кнопку, чтобы начать!**",
-        reply_markup=main_menu(is_premium, remaining),
+        f"💰 Цена: **{PREMIUM_PRICE} Stars** (~50₽)",
+        reply_markup=main_menu(is_premium, remaining, days_left),
         parse_mode="Markdown"
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    
+    try:
+        await query.answer()
+    except:
+        await query.message.reply_text("⏳ Кнопка устарела, нажми /start заново", reply_markup=main_menu(False, 0))
+        return ConversationHandler.END
     
     user_id = query.from_user.id
     reset_daily(user_id)
@@ -54,29 +74,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining = FREE_ATTEMPTS - avatar_count
     if remaining < 0:
         remaining = 0
+    days_left = get_premium_days_left(user_id)
 
     if query.data == "create":
         if not is_premium and avatar_count >= FREE_ATTEMPTS:
-            # Используем reply_text вместо edit_text
             await query.message.reply_text(
                 "❌ **Бесплатные попытки кончились!**\n\n"
-                f"💎 Купи премиум за **{PREMIUM_PRICE} Stars** и получи безлимит!",
+                f"💎 Купи премиум за **{PREMIUM_PRICE} Stars**",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("💎 Купить премиум", callback_data="premium_menu")],
                     [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
                 ]),
                 parse_mode="Markdown"
             )
-            return
+            return ConversationHandler.END
         
         await query.message.reply_text(
             "🎨 **Напиши, что хочешь увидеть на аватарке**\n\n"
-            "Примеры:\n"
-            "• Девушка с голубыми волосами\n"
-            "• Парень в капюшоне\n"
-            "• Милый котик\n"
-            "• Космический воин\n\n"
-            "Чем подробнее — тем круче результат! 🔥\n\n"
+            "Примеры: девушка с голубыми волосами, милый котик, космический воин\n\n"
             "✏️ Просто напиши текст в чат",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Отмена", callback_data="main_menu")]
@@ -85,30 +100,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_PROMPT
 
-    elif query.data == "again":
+    elif query.data == "video_create":
+        if not is_premium and avatar_count >= FREE_ATTEMPTS:
+            await query.message.reply_text(
+                "❌ **Бесплатные попытки кончились!**\n\n"
+                f"💎 Купи премиум за **{PREMIUM_PRICE} Stars**",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💎 Купить премиум", callback_data="premium_menu")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+                ]),
+                parse_mode="Markdown"
+            )
+            return ConversationHandler.END
+        
         await query.message.reply_text(
-            "🎨 **Напиши, что хочешь увидеть на аватарке**\n\n"
-            "Примеры:\n"
-            "• Девушка с голубыми волосами\n"
-            "• Парень в капюшоне\n"
-            "• Милый котик\n\n"
-            "✏️ Просто напиши текст в чат",
+            "🎬 **Напиши, что хочешь увидеть в видео**\n\n"
+            "Примеры: закат на море, город ночью, космический полёт\n\n"
+            "⏳ Может занять 20-40 секунд",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Отмена", callback_data="main_menu")]
             ]),
             parse_mode="Markdown"
         )
-        return WAITING_PROMPT
+        return WAITING_VIDEO
+
+    elif query.data == "fact":
+        fact = get_fact()
+        await query.message.reply_text(
+            f"🔥 **Факт дня:**\n\n{fact}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔥 Ещё факт", callback_data="fact")],
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+            ]),
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
 
     elif query.data == "premium_menu":
         await query.message.reply_text(
             f"💎 **Премиум доступ**\n\n"
-            "Что ты получаешь:\n"
-            "✅ **Безлимит** аватарок\n"
-            "✅ **HD качество**\n"
-            "✅ На **15 дней**\n\n"
-            f"💰 **Цена: {PREMIUM_PRICE} Stars** (~50₽)\n\n"
-            "Нажми на кнопку ниже для оплаты",
+            "✅ Безлимит всех функций\n"
+            "✅ HD качество\n"
+            "✅ На 15 дней\n\n"
+            f"💰 **{PREMIUM_PRICE} Stars** (~50₽)",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⭐ Оплатить Stars", callback_data="pay_stars")],
                 [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
@@ -120,30 +154,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "💎 Премиум" if is_premium else "🆓 Бесплатный"
         remaining_text = "∞ (безлимит)" if is_premium else remaining
         await query.message.reply_text(
-            f"📊 **Твоя статистика**\n\n"
+            f"📊 **Статистика**\n\n"
             f"Статус: **{status}**\n"
-            f"Создано аватарок: **{avatar_count}**\n"
-            f"Осталось сегодня: **{remaining_text}**\n\n"
-            f"💬 Напиши текст или нажми на кнопку!",
-            reply_markup=main_menu(is_premium, remaining),
+            f"Создано: **{avatar_count}**\n"
+            f"Осталось: **{remaining_text}**\n"
+            f"Дней премиума: **{days_left}**",
+            reply_markup=main_menu(is_premium, remaining, days_left),
             parse_mode="Markdown"
         )
 
     elif query.data == "main_menu":
         await query.message.reply_text(
-            f"🤖 **Главное меню**\n\n"
-            f"🔥 Бесплатно: **{remaining}** аватарок сегодня\n"
-            f"💎 Премиум: **безлимит** на 15 дней\n"
-            f"💰 Цена: **{PREMIUM_PRICE} Stars** (~50₽)\n\n"
-            "👇 **Выбери действие:**",
-            reply_markup=main_menu(is_premium, remaining),
+            f"🤖 **NeonFace**\n\n"
+            f"🔥 Осталось: **{remaining}** попыток\n"
+            f"💎 Премиум: безлимит на 15 дней\n"
+            f"💰 Цена: **{PREMIUM_PRICE} Stars**",
+            reply_markup=main_menu(is_premium, remaining, days_left),
             parse_mode="Markdown"
         )
 
     elif query.data == "pay_stars":
         await query.message.reply_invoice(
             title="Премиум 15 дней",
-            description="Безлимитные аватарки через нейросеть",
+            description="Безлимит: аватарки, видео",
             payload="premium_purchase",
             provider_token="",
             currency="XTR",
@@ -156,6 +189,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = update.message.text
     user_id = update.effective_user.id
+    
+    await update.message.reply_text("🎨 **Генерирую аватарку...** ⏳ 5-10 секунд")
     
     reset_daily(user_id)
     is_premium = check_premium(user_id)
@@ -174,44 +209,88 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        "🧠 **Генерирую аватарку через нейросеть...**\n"
-        "⏳ Это может занять 5-10 секунд\n"
-        "🔥 Результат будет 🔥"
-    )
-
     path = generate_avatar(prompt)
-
     if path:
         update_user_count(user_id)
         save_order(user_id, path)
-        
         remaining_after = FREE_ATTEMPTS - (avatar_count + 1)
         if remaining_after < 0:
             remaining_after = 0
+        days_left = get_premium_days_left(user_id)
             
         with open(path, 'rb') as photo:
             await update.message.reply_photo(
                 photo,
                 caption=f"✅ **Аватарка готова!**\n\n"
-                        f"📝 Запрос: **{prompt[:50]}**\n"
-                        f"🔥 Осталось: **{remaining_after if not is_premium else '∞'}** аватарок\n\n"
-                        f"💬 Напиши новый текст или нажми на кнопку!",
+                        f"📝 {prompt[:50]}\n"
+                        f"🔥 Осталось: **{remaining_after if not is_premium else '∞'}** попыток",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🎨 Ещё аватарку", callback_data="again")],
-                    [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+                    [InlineKeyboardButton("🎨 Ещё", callback_data="create")],
+                    [InlineKeyboardButton("🎬 Видео", callback_data="video_create")],
+                    [InlineKeyboardButton("🏠 Меню", callback_data="main_menu")]
+                ]),
+                parse_mode="Markdown"
+            )
+        os.remove(path)
+    else:
+        await update.message.reply_text("❌ Ошибка! Попробуй другой текст.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 Меню", callback_data="main_menu")]
+        ]))
+
+    return ConversationHandler.END
+
+async def handle_video_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = update.message.text
+    user_id = update.effective_user.id
+    
+    await update.message.reply_text("🎬 **Генерирую видео...** ⏳ 20-40 секунд")
+    
+    reset_daily(user_id)
+    is_premium = check_premium(user_id)
+    user_data = get_user(user_id)
+    avatar_count = user_data[0] if user_data else 0
+
+    if not is_premium and avatar_count >= FREE_ATTEMPTS:
+        await update.message.reply_text(
+            "❌ **Бесплатные попытки кончились!**\n\n"
+            f"💎 Купи премиум за **{PREMIUM_PRICE} Stars**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💎 Купить премиум", callback_data="premium_menu")],
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+            ]),
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    path = generate_video(prompt)
+    if path:
+        update_user_count(user_id)
+        save_order(user_id, path)
+        remaining_after = FREE_ATTEMPTS - (avatar_count + 1)
+        if remaining_after < 0:
+            remaining_after = 0
+            
+        with open(path, 'rb') as video:
+            await update.message.reply_video(
+                video,
+                caption=f"✅ **Видео готово!**\n\n"
+                        f"📝 {prompt[:50]}\n"
+                        f"🔥 Осталось: **{remaining_after if not is_premium else '∞'}** попыток",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🎬 Ещё", callback_data="video_create")],
+                    [InlineKeyboardButton("🎨 Аватарка", callback_data="create")],
+                    [InlineKeyboardButton("🏠 Меню", callback_data="main_menu")]
                 ]),
                 parse_mode="Markdown"
             )
         os.remove(path)
     else:
         await update.message.reply_text(
-            "❌ **Ошибка генерации!**\n\n"
-            "Попробуй написать другой текст.\n"
-            "💡 Совет: опиши подробнее на английском",
+            "❌ **Ошибка генерации видео!**\n\n"
+            "Попробуй другой текст.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Попробовать снова", callback_data="create")],
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+                [InlineKeyboardButton("🎨 Аватарка", callback_data="create")],
+                [InlineKeyboardButton("🏠 Меню", callback_data="main_menu")]
             ])
         )
 
@@ -223,18 +302,19 @@ async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     set_premium(user_id, 15)
+    days_left = get_premium_days_left(user_id)
     await update.message.reply_text(
         "💎 **Поздравляем! Премиум активирован!**\n\n"
-        "Теперь у тебя **безлимит** на 15 дней!\n\n"
-        "🔥 Просто пиши текст и получай аватарки!",
-        reply_markup=main_menu(True, 0),
+        f"🔥 Премиум активен на **{days_left}** дней!\n\n"
+        "Создавай аватарки и видео безлимитно!",
+        reply_markup=main_menu(True, 0, days_left),
         parse_mode="Markdown"
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❌ **Отменено!**",
-        reply_markup=main_menu(False, 0),
+        reply_markup=main_menu(False, 0, 0),
         parse_mode="Markdown"
     )
     return ConversationHandler.END
@@ -246,10 +326,11 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(button_handler, pattern="^create$"),
-            CallbackQueryHandler(button_handler, pattern="^again$")
+            CallbackQueryHandler(button_handler, pattern="^video_create$"),
         ],
         states={
             WAITING_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt)],
+            WAITING_VIDEO: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_prompt)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -265,8 +346,8 @@ def main():
     
     print("✅ Бот запущен!")
     print(f"💎 Премиум: {PREMIUM_PRICE} Stars / 15 дней")
-    print(f"🔥 Бесплатно: {FREE_ATTEMPTS} аватарок в день")
-    print("🎨 Кнопка 'Создать аватарку' в меню")
+    print(f"🔥 Бесплатно: {FREE_ATTEMPTS} попыток в день")
+    print("🎨 Аватарка | 🎬 Видео | 🔥 Факт дня")
     app.run_polling()
 
 if __name__ == "__main__":

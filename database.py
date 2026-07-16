@@ -1,6 +1,7 @@
 import sqlite3
 import time
 from datetime import date
+from config import FREE_ATTEMPTS
 
 def init_db():
     conn = sqlite3.connect('users.db')
@@ -13,7 +14,7 @@ def init_db():
             avatar_count INTEGER DEFAULT 0,
             premium INTEGER DEFAULT 0,
             premium_until INTEGER DEFAULT 0,
-            last_reset TEXT DEFAULT CURRENT_DATE
+            last_reset INTEGER DEFAULT 0
         )
     ''')
     
@@ -61,11 +62,27 @@ def set_premium(user_id, days=15):
     conn.close()
 
 def reset_daily(user_id):
+    """Проверяет, прошло ли 12 часов с последнего сброса"""
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute('UPDATE users SET avatar_count = 0, last_reset = ? WHERE user_id = ?', (date.today().isoformat(), user_id))
-    conn.commit()
+    now = int(time.time())
+    
+    c.execute('SELECT last_reset, avatar_count FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    
+    if result:
+        last_reset, avatar_count = result
+        if now - last_reset > 43200:  # 12 часов
+            c.execute('UPDATE users SET avatar_count = 0, last_reset = ? WHERE user_id = ?', (now, user_id))
+            conn.commit()
+            conn.close()
+            return True
+    else:
+        c.execute('UPDATE users SET last_reset = ? WHERE user_id = ?', (now, user_id))
+        conn.commit()
+    
     conn.close()
+    return False
 
 def check_premium(user_id):
     conn = sqlite3.connect('users.db')
